@@ -23,6 +23,7 @@ set -euo pipefail
 # - coreos-metal.x86_64.raw
 
 ARCH=$(arch)
+BASEDIR=$(dirname $0)
 
 # A list of supported platforms and the filename suffix of the main
 # artifact that platform produces.
@@ -64,7 +65,7 @@ check_rpms() {
     done
 }
 
-get_platform_filenames() {
+print_platform_manifest_filenames() {
     for platform_name in ${!SUPPORTED_PLATFORMS[@]}; do
         # metal4k is defined in platform.metal.ipp.yaml so we won't
         # output a filename when the platform is metal4k.
@@ -83,7 +84,7 @@ get_url() {
 
 main() {
     # Call getopt to validate the provided input.
-    options=$(getopt --options - --longoptions 'imgref:,ociarchive:,osname:,platforms:,metal-image-size:,cloud-image-size:,extra-kargs:' -- "$@")
+    options=$(getopt --options - --longoptions 'imgref:,ociarchive:,osname:,platforms:,metal-image-size:,cloud-image-size:,extra-kargs:,print-platform-manifest-filenames' -- "$@")
     if [ $? -ne 0 ]; then
         echo "Incorrect options provided"
         exit 1
@@ -123,6 +124,10 @@ main() {
             shift # The arg is next in position args
             # Split the comma separated string of platforms into an array
             IFS=, read -ra platforms <<<"$1"
+            ;;
+        --print-platform-manifest-filenames)
+            print_platform_manifest_filenames
+            exit 0
             ;;
         --)
             shift
@@ -185,19 +190,6 @@ main() {
     outdir="${tmpdir}/out"
     mkdir $outdir
 
-    # Freeze on specific version for now to increase stability.
-    #gitreporef="main"
-    gitreporef="e7b71cf6be309dfe7ba92aef03a6870e09219010"
-    gitrepotld="https://raw.githubusercontent.com/coreos/coreos-assembler/${gitreporef}/"
-    pushd "${tmpdir}"
-    platform_filenames=$(get_platform_filenames)
-    get_url "${gitrepotld}/src/runvm-osbuild"
-    chmod +x runvm-osbuild
-    for manifest in "coreos.osbuild.${ARCH}.mpp.yaml" $platform_filenames; do
-        get_url "${gitrepotld}/src/osbuild-manifests/${manifest}"
-    done
-    popd
-
     # - rootfs size is only used on s390x secex so we pass "0" here
     # - extra-kargs from image.yaml/image.json is currently empty
     #   on RHCOS but we may want to start picking it up from inside
@@ -217,9 +209,9 @@ main() {
     "extra-kargs-string": "${extra_kargs}"
 }
 EOF
-    "${tmpdir}/runvm-osbuild"                             \
+    "${BASEDIR}/cosa-imports/runvm-osbuild"               \
         --config "${runvm_osbuild_config_json}"           \
-        --mpp "${tmpdir}/coreos.osbuild.${ARCH}.mpp.yaml" \
+        --mpp "${BASEDIR}/cosa-imports/coreos.osbuild.${ARCH}.mpp.yaml" \
         --outdir "${outdir}"                              \
         --platforms "$(IFS=,; echo "${platforms[*]}")"
 

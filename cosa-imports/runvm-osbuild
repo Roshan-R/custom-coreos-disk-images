@@ -1,0 +1,148 @@
+# Synced from https://raw.githubusercontent.com/coreos/coreos-assembler/e7b71cf6be309dfe7ba92aef03a6870e09219010/src/runvm-osbuild
+#!/bin/bash
+set -euo pipefail
+
+usage() {
+    cat <<EOC
+${0} runs in a supermin virtual machine to then
+run OSBuild to build a CoreOS style disk image.
+
+Options:
+    --config: JSON-formatted image.yaml
+    --help: show this help
+    --mpp: the path to the OSBuild mpp.yaml file
+    --outdir: where to write the created files
+    --platforms: the platforms to generate an artifact for
+
+You probably don't want to run this script by hand. This script is
+run as part of 'coreos-assembler build'.
+EOC
+}
+
+# Parse the passed config JSON and extract a mandatory value
+getconfig() {
+    k=$1
+    jq -re .\""$k"\" < "${config}"
+}
+# Return a configuration value, or default if not set
+getconfig_def() {
+    k=$1
+    shift
+    default=$1
+    shift
+    jq -re .\""$k"\"//\""${default}"\" < "${config}"
+}
+
+log_disk_usage(){
+    # spawn off a subshell in the background to log disk usage every
+    # 10 seconds.
+    yellow="\033[33m"; default="\033[39m"
+    (while true; do
+        echo -e "$yellow"; df -kh ./cache; echo -e "$default";
+        sleep 10;
+        pgrep --exact osbuild >/dev/null || break;
+    done) &
+}
+
+while [ $# -gt 0 ];
+do
+    flag="${1}"; shift;
+    case "${flag}" in
+        --config)                  config="${1}"; shift;;
+        --help)                    usage; exit;;
+        --mpp)                     mppyaml="${1}"; shift;;
+        --outdir)                  outdir="${1}"; shift;;
+        --platforms)
+            # Split the comma separated string of platforms into an array
+            IFS=, read -ra platforms <<<"$1"; shift
+            ;;
+         *) echo "${flag} is not understood."; usage; exit 10;;
+     esac;
+done
+
+artifact_name_prefix=$(getconfig_def "artifact-name-prefix" "custom-coreos")
+build_version=$(getconfig_def "build-version" "0")
+ostree_container=$(getconfig "ostree-container")
+osname=$(getconfig "osname")
+deploy_via_container=$(getconfig_def "deploy-via-container" "")
+metal_image_size_mb=$(getconfig "metal-image-size")
+cloud_image_size_mb=$(getconfig "cloud-image-size")
+rootfs_size_mb=$(getconfig "rootfs-size")
+container_imgref=$(getconfig "container-imgref")
+container_repo=$(getconfig_def "container-repo" "")
+container_tag=$(getconfig_def "container-tag" "")
+extra_kargs=$(getconfig "extra-kargs-string" "")
+# If we are not deploying via container let's go ahead and
+# set the OSTree repo and ref information
+ostree_ref=""
+ostree_repo=""
+if [ -z "${deploy_via_container}" ]; then
+    ostree_ref=$(getconfig "ostree-ref")
+    ostree_repo="file://$(getconfig "ostree-repo")"
+fi
+
+# Since it doesn't exist create loop-control
+[ ! -e /dev/loop-control ] && mknod /dev/loop-control c 10 237
+
+# Put the store on the cache filesystem since in the case we are
+# running unprivileged in COSA we won't be able to create files
+# with SELinux labels that the host's policy doesn't know about.
+storedir=cache/osbuild/store
+
+# Musical chairs for now with the outdir because osbuild does
+# cp -a and that will fail to preserve ownership when copying
+# from the cache qcow2 (where files are owned by root) to the
+# virtiofs mount. Eventually we can use idmapped virtiofs mount
+# inside the supermin VM and we won't need this.
+# https://gitlab.com/virtio-fs/virtiofsd/-/merge_requests/245
+orig_outdir=$outdir
+outdir=cache/osbuild/out
+
+processed_json=$(mktemp -t osbuild-XXXX.json)
+
+# Run `podman images` here to initialize a few directories inside the
+# supermin VM. Otherwise the org.osbuild.container-deploy stage will
+# fail to copy things into containers-storage. This also happens to
+# clean up a skopeo error relating to /etc/containers/networks not existing.
+podman images > /dev/null
+
+# Run through the preprocessor
+# Note: don't quote the size arguements since they are numbers, not strings
+set -x; osbuild-mpp                                       \
+    -D arch=\""$(arch)"\"                                 \
+    -D artifact_name_prefix=\""${artifact_name_prefix}"\" \
+    -D build_version=\""${build_version}"\"               \
+    -D ostree_ref=\""${ostree_ref}"\"                     \
+    -D ostree_repo=\""${ostree_repo}"\"                   \
+    -D ociarchive=\""${ostree_container}"\"               \
+    -D osname=\""${osname}"\"                             \
+    -D container_imgref=\""${container_imgref}"\"         \
+    -D container_repo=\""${container_repo}"\"             \
+    -D container_tag=\""${container_tag}"\"               \
+    -D extra_kargs=\""${extra_kargs}"\"                   \
+    -D metal_image_size_mb="${metal_image_size_mb}"       \
+    -D cloud_image_size_mb="${cloud_image_size_mb}"       \
+    -D rootfs_size_mb="${rootfs_size_mb}"                 \
+    "${mppyaml}" "${processed_json}"
+set +x
+
+log_disk_usage
+
+# Build the image
+set -x
+# shellcheck disable=SC2068
+osbuild \
+    --out "$outdir"              \
+    --store "$storedir"          \
+    --cache-max-size 20GiB       \
+    --checkpoint deployed-tree   \
+    --checkpoint tree            \
+    --checkpoint raw-image       \
+    --checkpoint metal           \
+    --checkpoint metal4k         \
+    ${platforms[@]/#/--export=}  \
+    "${processed_json}"
+set +x
+
+mv "${outdir}"/* "${orig_outdir}/"
+rm -f "${processed_json}"
