@@ -187,7 +187,7 @@ main() {
 
     # Freeze on specific version for now to increase stability.
     #gitreporef="main"
-    gitreporef="60d468e70172345d807886f1e3685b74803c370f"
+    gitreporef="e7b71cf6be309dfe7ba92aef03a6870e09219010"
     gitrepotld="https://raw.githubusercontent.com/coreos/coreos-assembler/${gitreporef}/"
     pushd "${tmpdir}"
     platform_filenames=$(get_platform_filenames)
