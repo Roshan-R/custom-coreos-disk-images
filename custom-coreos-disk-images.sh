@@ -144,11 +144,6 @@ main() {
         echo "SELinux needs to be set to either permissive or disabled"
         exit 1
     fi
-    # Make sure we are effectively `root`
-    if [ $UID -ne 0 ]; then
-        echo "OSBuild needs to run with root permissions"
-        exit 1
-    fi
     # Make sure the given file exists
     if [ ! -f $ociarchive ]; then
         echo "need to pass in the path to .ociarchive file"
